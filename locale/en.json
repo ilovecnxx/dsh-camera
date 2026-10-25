@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Camera Upload",
+    "description": "Adds a camera entry below the composer: scan the QR code with your phone and photos are sent straight into the current chat."
+  }
+}

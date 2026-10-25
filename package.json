@@ -1,0 +1,62 @@
+{
+  "name": "@local/dsh-camera",
+  "version": "0.1.0",
+  "description": "DSH web plugin: take photos on a LAN phone and send them straight into the current conversation (manual review & send, no cloud).",
+  "type": "module",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "DESIGN.md",
+    "LICENSE",
+    "README.md",
+    "client.js",
+    "cordis.patch.yml",
+    "docs/screenshots",
+    "index.js",
+    "lib",
+    "locale/*.json"
+  ],
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check index.js && node --check client.js && node --check lib/server.js && node --check lib/page.js && node --check lib/tokens.js && node --check lib/multipart.js && node --check lib/inject.js && node --check lib/rpc.js && node --check lib/qr.js && node --check lib/lan-ip.js && node --check lib/config.js"
+  },
+  "engines": {
+    "dsh": ">=0.2.1-rc.3 <0.3.0-0"
+  },
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ilovecnxx/dsh-camera.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ilovecnxx/dsh-camera/issues"
+  },
+  "homepage": "https://github.com/ilovecnxx/dsh-camera#readme",
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "dsh-plugin",
+    "camera",
+    "mobile",
+    "lan",
+    "photo-upload"
+  ]
+}

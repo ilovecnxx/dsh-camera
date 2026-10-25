@@ -1,0 +1,9 @@
+# dsh-camera bundle patch：把自己作为一行插入 profile 组合树。
+# Host 半负责 LAN HTTP 服务器 + webServer RPC + 图片注入；Client 半负责输入框下方入口与二维码面板。
+# 可选的 config（无 schema 时原样传给 apply(ctx, config)）：
+#   port: 3579            # LAN 端口（0 = 由系统分配）
+#   lanIpOverride: ''     # 手动指定局域网 IP（默认自动探测）
+#   tokenTtlMs: 7200000   # 手机链接有效期
+- insert:
+    - id: dsh-camera
+      name: '@local/dsh-camera'
