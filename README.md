@@ -16,9 +16,12 @@ then tap **Send** to deliver the batch as one message.
 | 能力 | 说明 |
 |---|---|
 | 一键生成入口 | 输入框下方「拍照上传」按钮，点击即生成二维码 + 链接，绑定**当前对话** |
-| 手机拍照 | 手机浏览器打开链接后：调用后置摄像头拍照，或从相册多选 |
+| 手机拍照 | 手机浏览器打开链接后：拍照（可连拍）、或从相册多选 |
+| 全屏相机 · 无闪光灯 | 可选 HTTPS 模式：在页面内全屏取景、连拍，不触发闪光灯/补光（iPhone 也可用；首次需装一次本机证书） |
+| 上传进度 | 手机页显示发送进度（XHR upload progress），大图也有反馈 |
 | 拍完手动发送 | 可连续拍/选多张，先本地压缩预览，点「发送 N 张」才一起发进对话（不自动发送） |
 | 自动压缩 | 手机端 canvas 压缩（长边 ≤ 2400、JPEG 0.85），大图秒传、省流量 |
+| HEIC 兼容 | iOS 相册 HEIC 先尝试浏览器解码转 JPEG，失败才提示 |
 | 直接进对话 | 每次上传成为该对话的一条 user 消息（多图合成一条），不经过中转文件夹 |
 | 安全 | 链接含 24 字符随机 token、默认 2 小时过期、仅当前对话可注入、仅局域网接口、每 token 限流；服务器只提供拍照页，不暴露 DSH 本体 |
 | 中英双语 | 电脑面板与手机页都跟随中文/英文环境 |
@@ -96,6 +99,8 @@ dsh plugin --profile web add link:$PWD/dsh-camera
         maxUploadBytes: 25165824 # 单次上传请求上限（默认 24 MiB）
         maxFilesPerUpload: 6    # 一次最多几张图
         uploadsPerHour: 120     # 每个 token 每小时上传次数上限
+        https: false            # 可选：开启 HTTPS 全屏相机（iPhone 用，见下）
+        httpsPort: 0            # HTTPS 端口；0 = HTTP 端口 + 1
 ```
 
 环境变量覆盖（便于临时排障）：
@@ -105,6 +110,26 @@ dsh plugin --profile web add link:$PWD/dsh-camera
 | `DSH_CAMERA_PORT` | 覆盖端口 |
 | `DSH_CAMERA_LAN_IP` | 覆盖局域网 IP |
 | `DSH_CAMERA_DEBUG=1` | 打开插件调试日志（Host 日志前缀 `dsh-camera`） |
+
+## iPhone 全屏相机（HTTPS，可选）
+
+iOS Safari 只在 **HTTPS（受信任证书）** 下允许网页直接调用相机。默认的 HTTP 模式用的是系统相机
+（能拍照，但不是页面内全屏，也无法关闭系统闪光灯）。想要页面内全屏、连拍、无闪光灯：
+
+1. 在插件配置里开启 `https: true`（重启或热加载后生效）。
+2. 电脑面板会出现「全屏相机（HTTPS）：已开启」；手机重新打开拍照页。
+3. 手机页会出现「iPhone 全屏相机」提示（见下图），点 **安装证书**：
+
+![手机页 HTTPS 全屏相机引导](docs/screenshots/secure-hint.png)
+
+   - iPhone：下载描述文件 → 设置 → 已下载描述文件 → 安装 → 通用 → 关于本机 → 证书信任设置 → 信任 `dsh-camera local CA`；
+   - Android：下载 `.crt` → 设置 → 安全 → 加密与凭据 → 安装证书 → CA 证书。
+4. 回到拍照页点 **用全屏相机打开**（https://<LAN-IP>:<httpsPort>/c/<token>），
+   点「拍照」即可在页面内全屏连拍，**不会调用闪光灯**。
+
+- 证书在本机 `$DSH_HOME/dsh-camera/tls/` 生成（本地 CA + 服务器证书），只覆盖局域网地址；
+- 安装页：`http://<LAN-IP>:<HTTP 端口>/setup`，证书下载：`/ca.mobileconfig`（iPhone）、`/ca.crt`（Android）；
+- 不需要全屏相机时保持 `https: false` 即可，功能不受影响。
 
 ## 安全说明
 
@@ -126,40 +151,39 @@ dsh plugin --profile web add link:$PWD/dsh-camera
 | 上传报「链接已过期」 | 在电脑上重新打开面板生成新链接 |
 | 面板二维码显示但 URL 是 127.0.0.1 | 未检测到 LAN IP，回退本地地址；设置 `lanIpOverride` |
 
-## 开发与测试
-
-```sh
-cd dsh-camera
-node --test                 # 单元测试（零外部依赖）：152 项，151 pass / 1 todo / 0 fail
-node scripts/e2e.mjs        # 隔离 profile + Chrome headless 全链路 E2E（不碰真实 3080）
-```
-
-本次交付的 E2E 结果（2026-10-25，11.1s，14/14 步通过）：
-
-- GUI 建会话 → dock「拍照上传」→ 面板二维码 + `http://10.10.10.10:3579/c/<token>`；
-- 手机页塞 2 张测试图 → **不自动上传**（pending=2、upload 请求 0）→ 点「发送」→ 412ms 上传完成；
-- 桌面面板「已接收 2 张」；GUI 对话里出现 2 张图片消息；
-- 独立解压会话日志 `session.v4.jsonl.zstd`：1 条 user/message 含 2 个 image block（sha256 附件）。
-
 ## 截图
 
-电脑端入口与二维码面板：
+电脑端入口与二维码面板（开启 HTTPS 后会多一行「全屏相机（HTTPS）：已开启」）：
 
-![拍照上传面板](docs/screenshots/panel.png)
+![拍照上传面板](docs/screenshots/panel-https.png)
 
 手机页：拍多张后先进入待发送预览，点「发送 N 张」才上传（不自动发送）：
 
 ![手机页手动发送](docs/screenshots/phone-manual-send.png)
 
+可选 HTTPS 全屏相机：首次装一次本机证书，之后页面内全屏取景、连拍、**无闪光灯**：
+
+![手机全屏相机](docs/screenshots/fullscreen-camera.png)
+
 手机发出的照片直接出现在 DSH 对话里（作为 user 消息、带 durable 图片附件）：
 
 ![照片进入对话](docs/screenshots/conversation.png)
 
-## 开发
+## 开发与测试
 
-开发与验证细节见 [DESIGN.md](DESIGN.md)；e2e 产物写入本地 `verification/`（已 gitignore）。
-仓库结构：`index.js` + `lib/`（Host 半）、`client.js`（浏览器半）、`tests/`（单元测试）、
-`scripts/e2e.mjs`（隔离 profile + headless Chrome 全链路 E2E）。
+```sh
+cd dsh-camera
+node --test                  # 单元测试（零外部依赖）：169 项，165 pass / 3 skipped / 1 todo / 0 fail
+node scripts/e2e.mjs         # HTTP 手动发送全链路 E2E（隔离 profile + headless Chrome）
+node scripts/e2e-camera.mjs  # HTTPS 全屏相机 E2E（Chrome fake camera + secure-context 覆盖）
+```
+
+本次 E2E 结果（2026-10-26，v0.2.0）：
+
+- **HTTP E2E PASS（11.3s，14/14 步）**：面板二维码 → 手机页选图（不自动上传，upload 请求 0）→
+  手动「发送 2 张」→ 桌面计数 2 → GUI 图片消息 → 解压会话日志确认 2 个 image block；
+- **全屏相机 E2E PASS（11.2s）**：开启 HTTPS 后 HTTP 页显示「iPhone 全屏相机」引导 →
+  页面内全屏相机取景 → 连拍 2 张进入待发送（上传请求 0）→ 手动发送 → 对话/日志校验通过。
 
 隔离验证（不污染真实 profile）：
 

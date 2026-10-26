@@ -246,7 +246,17 @@ test('envelope 成功：POST /dsh-camera/camera.status → 200 server-response +
     assert.deepEqual(response.json.result, {
       ok: true,
       value: {
-        server: { running: true, port: PORT, lanIp: LAN_IP, localOnly: false, warning: null },
+        server: {
+          running: true,
+          port: PORT,
+          lanIp: LAN_IP,
+          localOnly: false,
+          warning: null,
+          httpsEnabled: false,
+          httpsPort: null,
+          setupUrl: null,
+          caFingerprint: null,
+        },
         config: {
           enabled: true,
           port: PORT,

@@ -95,6 +95,8 @@ export const DEFAULTS = {
   maxUploadBytes: 24 * 1024 * 1024, // 单次请求总字节上限
   maxFilesPerUpload: 6,
   uploadsPerHour: 120,      // 每 token 每小时上传次数上限
+  https: false,             // 可选 HTTPS 监听（getUserMedia 全屏相机需要 secure context）
+  httpsPort: 0,             // HTTPS 端口；0 = HTTP 实际端口 + 1
 };
 export function resolveConfig(rawConfig, env = process.env) → {
   ...DEFAULTS, stateDir /* $DSH_HOME/dsh-camera 或 ~/.dsh/dsh-camera */,
@@ -184,7 +186,9 @@ export async function startCameraServer({
   lanIp,             // 3.2 结果，可能 null
   startedAt,
   buildUrl(token),    // → `http://<lanIp>:<port>/c/<token>`；无 lanIp 时用 127.0.0.1 并标记 localOnly
-  info(),             // → {running:true, port, lanIp, localOnly, startedAt, version}
+  info(),             // → {running, port, httpPort, lanIp, localOnly, startedAt, version,
+                      //     warning, httpsEnabled, httpsPort, httpsWarning, setupUrl, caFingerprint}
+  buildHttpsUrl(token), // HTTPS 相机页（httpsEnabled 时），否则 null
   stop(): Promise<void>,
 }
 ```
@@ -196,6 +200,9 @@ HTTP 路由（全部 `Cache-Control: no-store`、`X-Content-Type-Options: nosnif
 | GET | `/c/:token` | token 有效 → 200 HTML（`page.js`）；无效/过期 → 410 HTML 提示页（中文/英文） |
 | GET | `/c/:token/info` | JSON `{ok:true, value:{title, expiresAt, uploads, serverTime, version, lang}}`；无效 → 404 `{ok:false,error:{code:'invalid-token'}}` |
 | POST | `/c/:token/upload` | 读 multipart → 校验图片(sniff/大小/数量) → injector.deliver → JSON `{ok:true, value:{count, expiresAt, uploads}}`；失败 → 4xx/5xx JSON `{ok:false,error:{code,message}}`（code: invalid-token / too-large / bad-request / no-image / rate-limited / inject-failed:<code>） |
+| GET | `/setup` | 证书安装引导页（HTTPS 全屏相机首次配置；手机打开） |
+| GET | `/ca.mobileconfig` | iOS 配置描述文件（内嵌本地 CA，安装后信任） |
+| GET | `/ca.crt` | CA 证书 PEM（Android/其他系统安装） |
 | GET | `/favicon.ico` | 204 |
 | 其他 | * | 404 文本 |
 
@@ -228,6 +235,11 @@ export function renderCameraPage({
 - 点发送时把全部待发送照片 → 一次 `POST /c/<token>/upload`（FormData，字段名 `photo`，可多个）。
 - 成功：绿色「已发送到对话」+ 累计计数；失败：红色错误文案 + 重试按钮；token 过期（410）→ 明确提示「请在电脑上重新打开拍照面板」。
 - 可访问性：`lang` 属性、按钮 aria-label、`prefers-color-scheme` 深色适配、`env(safe-area-inset-*)`。
+- 全屏相机（可选，仅 `window.isSecureContext` 时）：拍照按钮打开 `data-cam-camera` 覆盖层，
+  `<video>` 实时取景、`data-cam-shutter` 连拍（canvas → JPEG → 待发送列表）、`data-cam-flip` 切换镜头、
+  `data-cam-camera-close` 关闭；**代码从不请求 torch/闪光灯**，也不做屏幕补光。
+  非 secure context 时拍照按钮回退系统相机（`capture` input），并在页面显示 HTTPS 引导（`data-cam-secure-hint`）。
+- 上传进度：XHR `upload.onprogress` 驱动 `data-cam-progress` 进度条与状态文案。
 - 测试锚点（E2E 用）：`data-cam-page`、`data-cam-input-capture`、`data-cam-input-gallery`、
   `data-cam-status`（值 `idle|working|done|error`）、`data-cam-count`、`data-cam-error`、
   `data-cam-send`（按钮，`data-cam-send-count`=待发送张数）、`data-cam-send-label`、

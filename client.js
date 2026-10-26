@@ -51,7 +51,7 @@ window.__ModuleLoader__.load({
       stepsTitle: 'How it works',
       step1: 'Connect your phone to the same Wi-Fi as this computer.',
       step2: 'Scan the QR code, or open the link below on your phone.',
-      step3: 'Take or pick a photo — it is sent to this chat automatically.',
+      step3: 'Take or pick photos, review them, then tap Send to deliver the batch.',
       metaChat: 'Chat',
       metaExpires: 'Link expires in',
       metaReceived: 'Photos received',
@@ -69,6 +69,9 @@ window.__ModuleLoader__.load({
       retry: 'Retry',
       currentChat: 'Current chat',
       blankHint: 'This is a new chat — the first photo you send becomes its first message.',
+      secureOn: 'Fullscreen camera (HTTPS): on',
+      secureOff: 'Fullscreen camera (HTTPS): off',
+      secureOffHint: 'iPhone fullscreen capture needs HTTPS — set https: true in the plugin config.',
       warningNotice: 'Notice: {message}',
       errServerUnavailableTitle: 'The LAN service is not running',
       errServerUnavailableHint: 'Restart DSH, or enable the dsh-camera plugin, then try again.',
@@ -97,7 +100,7 @@ window.__ModuleLoader__.load({
       stepsTitle: '使用方法',
       step1: '手机连接与电脑相同的 Wi-Fi。',
       step2: '扫描二维码，或在手机浏览器打开下方链接。',
-      step3: '拍照或选择照片，自动发送到当前对话。',
+      step3: '拍照或选图，预览确认后点「发送」把这一批发进对话。',
       metaChat: '目标对话',
       metaExpires: '链接有效期',
       metaReceived: '已接收',
@@ -115,6 +118,9 @@ window.__ModuleLoader__.load({
       retry: '重试',
       currentChat: '当前对话',
       blankHint: '这是新对话，手机发来的第一张照片会成为该对话的第一条消息。',
+      secureOn: '全屏相机（HTTPS）：已开启',
+      secureOff: '全屏相机（HTTPS）：未开启',
+      secureOffHint: 'iPhone 全屏拍摄需开启 HTTPS：在插件配置里设置 https: true。',
       warningNotice: '提示：{message}',
       errServerUnavailableTitle: '局域网服务未启动',
       errServerUnavailableHint: '请重启 DSH，或确认 dsh-camera 插件已启用后重试。',
@@ -520,6 +526,7 @@ window.__ModuleLoader__.load({
       const [uploads, setUploads] = React.useState([]); // camera.recent uploads
       const [now, setNow] = React.useState(() => Date.now());
       const [warning, setWarning] = React.useState(''); // camera.status server warning
+      const [serverInfo, setServerInfo] = React.useState(null); // camera.status server facts (https etc.)
       const [copyState, setCopyState] = React.useState('idle'); // idle | copied | failed
       const [showFullUrl, setShowFullUrl] = React.useState(false);
       const [pos, setPos] = React.useState(undefined);
@@ -616,6 +623,13 @@ window.__ModuleLoader__.load({
           const server = result.value && result.value.server;
           const serverWarning = server && typeof server === 'object' ? asText(server.warning) : '';
           setWarning(serverWarning);
+          if (server && typeof server === 'object') {
+            setServerInfo({
+              httpsEnabled: server.httpsEnabled === true,
+              httpsPort: typeof server.httpsPort === 'number' ? server.httpsPort : null,
+              setupUrl: asText(server.setupUrl),
+            });
+          }
         })();
         return () => {
           cancelled = true;
@@ -938,6 +952,20 @@ window.__ModuleLoader__.load({
         );
       };
 
+      const renderSecure = () => {
+        if (serverInfo === null) return null;
+        const on = serverInfo.httpsEnabled === true;
+        return h(
+          'div',
+          {
+            className: on ? 'dshCam_secureRow dshCam_secureOn' : 'dshCam_secureRow',
+            'data-dsh-camera-https': on ? 'on' : 'off',
+            title: on ? '' : tr('secureOffHint'),
+          },
+          h('span', null, on ? tr('secureOn') : tr('secureOff')),
+        );
+      };
+
       const renderMeta = () =>
         h(
           'dl',
@@ -1063,6 +1091,7 @@ window.__ModuleLoader__.load({
           { className: 'dshCam_body' },
           renderQrFrame(),
           renderSteps(),
+          renderSecure(),
           renderMeta(),
           h('div', { className: 'dshCam_urlBox' }, renderUrl(), showFullUrl === true ? renderFullUrl() : null),
           copyState === 'failed'
@@ -1234,6 +1263,8 @@ window.__ModuleLoader__.load({
       '.dshCam_steps{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:5px}',
       '.dshCam_step{display:flex;align-items:flex-start;gap:8px;font-size:12px;line-height:17px;color:var(--dsw-alias-label-secondary)}',
       '.dshCam_stepNo{flex:none;box-sizing:border-box;width:16px;height:16px;margin-top:1px;border-radius:50%;background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-tertiary);font-size:10px;font-weight:500;line-height:16px;text-align:center;font-variant-numeric:tabular-nums}',
+      '.dshCam_secureRow{display:flex;align-items:center;gap:6px;padding:6px 10px;border-radius:10px;background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-tertiary);font-size:11px;line-height:16px}',
+      '.dshCam_secureOn{color:var(--dsw-alias-label-secondary)}',
       '.dshCam_meta{display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 12px;margin:0;padding-top:10px;border-top:.5px solid var(--dsw-alias-border-l2);color:var(--dsw-alias-label-tertiary)}',
       '.dshCam_meta dt,.dshCam_meta dd{min-width:0;margin:0}',
       '.dshCam_meta dd{color:var(--dsw-alias-label-secondary);text-align:right;font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}',

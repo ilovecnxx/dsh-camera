@@ -3,6 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import net from 'node:net';
+import https from 'node:https';
 import path from 'node:path';
 import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -189,6 +190,13 @@ test('GET /c/:token：200 手机页，含 DESIGN 3.7 全部锚点/内联资源/�
     'data-cam-status',
     'data-cam-count',
     'data-cam-error',
+    'data-cam-send',
+    'data-cam-clear',
+    'data-cam-camera',
+    'data-cam-video',
+    'data-cam-shutter',
+    'data-cam-flip',
+    'data-cam-progress',
   ]) {
     assert.ok(html.includes(anchor), `页面缺少测试锚点 ${anchor}`);
   }
@@ -201,7 +209,8 @@ test('GET /c/:token：200 手机页，含 DESIGN 3.7 全部锚点/内联资源/�
   assert.ok(html.includes('capture="environment"'));
   assert.ok(html.includes('accept="image/*"'));
   assert.ok(html.includes('multiple'));
-  assert.ok(html.includes('fetch('));
+  assert.ok(html.includes('XMLHttpRequest'));
+  assert.ok(!html.includes('navigator.mediaDevices.getUserMedia') || html.includes('isSecureContext'));
   assert.ok(html.includes('FormData'));
   assert.ok(html.includes('canvas'));
   assert.ok(html.includes('@media (prefers-color-scheme:dark)'));
@@ -695,10 +704,16 @@ test('server 对象：buildUrl 使用 LAN IP 与真实端口；info 字段齐全
 
   const info = h.server.info();
   assert.deepEqual(Object.keys(info).sort(), [
+    'caFingerprint',
+    'httpPort',
+    'httpsEnabled',
+    'httpsPort',
+    'httpsWarning',
     'lanIp',
     'localOnly',
     'port',
     'running',
+    'setupUrl',
     'startedAt',
     'version',
     'warning',
@@ -851,4 +866,93 @@ test('clientError：畸形 HTTP 请求得到 400 而不是崩溃', async (t) => 
   const res = await fetch(`${h.base}/favicon.ico`);
   assert.equal(res.status, 204);
   await res.arrayBuffer();
+});
+
+// --------------------------------------------------------------------- HTTPS 全屏相机
+
+/** 用自签名证书访问 HTTPS（只用于单测）。 */
+function httpsGet(url, { timeoutMs = 10000 } = {}) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, { rejectUnauthorized: false, timeout: timeoutMs }, (res) => {
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => {
+        resolve({
+          status: res.statusCode,
+          headers: res.headers,
+          body: Buffer.concat(chunks).toString('utf8'),
+        });
+      });
+    });
+    req.on('timeout', () => req.destroy(new Error('timeout')));
+    req.on('error', reject);
+  });
+}
+
+test('HTTPS：https:true 启动双监听，页面/证书路由齐全', async (t) => {
+  const h = await startHarness(t, {
+    config: { https: true, httpsPort: 0, port: 0 },
+  });
+  const info = h.server.info();
+  assert.equal(info.httpsEnabled, true, JSON.stringify(info));
+  assert.ok(Number.isInteger(info.httpsPort) && info.httpsPort > 0);
+  assert.equal(info.httpsWarning, null);
+  assert.match(info.setupUrl ?? '', /^http:\/\/10\.10\.10\.10:\d+\/setup$/);
+  const httpsUrl = h.server.buildHttpsUrl(h.token);
+  assert.match(httpsUrl ?? '', /^https:\/\/10\.10\.10\.10:\d+\/c\//);
+  assert.equal(h.server.buildUrl(h.token).startsWith('http://'), true);
+
+  // HTTP 页面：secure=false，带 httpsUrl + setupUrl，显示全屏相机引导
+  const httpPage = await fetch(`${h.base}/c/${h.token}`);
+  const httpHtml = await httpPage.text();
+  assert.ok(httpHtml.includes('"secure":false'));
+  assert.ok(httpHtml.includes('"httpsUrl":"https://'));
+  assert.ok(httpHtml.includes('"setupUrl":"http://'));
+  assert.ok(httpHtml.includes('data-cam-secure-hint'));
+
+  // HTTPS 页面：secure=true，包含全屏相机覆盖层（测试实例只绑回环，换成 127.0.0.1 访问）
+  const loopbackHttpsUrl = httpsUrl.replace('10.10.10.10', '127.0.0.1');
+  const securePage = await httpsGet(loopbackHttpsUrl);
+  assert.equal(securePage.status, 200);
+  assert.ok(securePage.body.includes('"secure":true'));
+  assert.ok(securePage.body.includes('data-cam-camera'));
+  assert.ok(securePage.body.includes('data-cam-shutter'));
+  // 明确不启用闪光灯/torch，也不调用 applyConstraints 修改轨道。
+  assert.ok(!/torch\s*:\s*true/.test(securePage.body));
+  assert.ok(!securePage.body.includes('applyConstraints'));
+
+  // 证书安装路由（HTTP + HTTPS 都提供）
+  const setup = await fetch(`${h.base}/setup`);
+  assert.equal(setup.status, 200);
+  const setupHtml = await setup.text();
+  assert.ok(setupHtml.includes('dsh-camera local CA'));
+  assert.ok(setupHtml.includes('/ca.mobileconfig'));
+  assert.ok(setupHtml.includes('/ca.crt'));
+
+  const mobile = await fetch(`${h.base}/ca.mobileconfig`);
+  assert.equal(mobile.status, 200);
+  assert.equal(mobile.headers.get('content-type'), 'application/x-apple-aspen-config');
+  assert.match(mobile.headers.get('content-disposition') ?? '', /attachment; filename="dsh-camera-ca.mobileconfig"/);
+  assert.ok((await mobile.text()).includes('com.apple.security.root'));
+
+  const ca = await fetch(`${h.base}/ca.crt`);
+  assert.equal(ca.status, 200);
+  assert.ok((await ca.text()).includes('BEGIN CERTIFICATE'));
+
+  const caHttps = await httpsGet(`${loopbackHttpsUrl.replace(/\/c\/[^/]+$/, '')}/ca.crt`);
+  assert.equal(caHttps.status, 200);
+});
+
+test('HTTPS：未开启时 /ca.* 404，且 info.httpsEnabled=false', async (t) => {
+  const h = await startHarness(t);
+  const info = h.server.info();
+  assert.equal(info.httpsEnabled, false);
+  assert.equal(info.httpsPort, null);
+  assert.equal(info.setupUrl, null);
+  assert.equal(h.server.buildHttpsUrl(h.token), null);
+  assert.equal((await fetch(`${h.base}/ca.mobileconfig`)).status, 404);
+  assert.equal((await fetch(`${h.base}/ca.crt`)).status, 404);
+  const html = await (await fetch(`${h.base}/c/${h.token}`)).text();
+  assert.ok(html.includes('"secure":false'));
+  assert.ok(html.includes('"httpsUrl":null'));
 });
