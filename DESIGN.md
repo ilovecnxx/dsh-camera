@@ -99,6 +99,7 @@ export const DEFAULTS = {
   maxImageBytes: 20 * 1024 * 1024,  // 单图上限（不压缩，仅校验；DSH 硬限制）
   maxVideoBytes: 80 * 1024 * 1024,  // 单个视频上限（原样保存）
   maxRecordSeconds: 60,     // 页面内录像最长秒数（HTTPS 全屏相机）
+  recordVideoBitsPerSecond: 10_000_000, // 页面内录像码率（默认 10 Mbps；可调至 50 Mbps）
   maxFilesPerUpload: 6,
   uploadsPerHour: 120,      // 每 token 每小时上传次数上限
   https: false,             // 可选 HTTPS 监听（getUserMedia 全屏相机需要 secure context）
@@ -247,7 +248,9 @@ export function renderCameraPage({
   确认后点发送一次性上传为一条 user 消息。
 - **不压缩**：图片原样上传；仅 HEIC/HEIF 由浏览器解码后转全分辨率 JPEG（0.98）；
   超过 `maxImageBytes` 或解码失败给出中英文提示。视频原样保存，不转码。
-- 视频入口：`data-cam-video-btn`（HTTP 模式调系统相机录像/`<input capture>`）；
+- 视频入口：`data-cam-video-btn` **默认调系统相机录像**（`<input capture>`，设备原生画质，
+  网页不压缩/不转码）；全屏覆盖层内仍可切「录像」模式（MediaRecorder，码率
+  `recordVideoBitsPerSecond`，默认 10 Mbps，带麦克风，`data-cam-record-hint` 提示编码限制）；
   相册输入接受 `image/*,video/*`；HTTPS 全屏相机内可切「录像」模式
   （`data-cam-mode-video`、MediaRecorder、`data-cam-record-time`，默认最长 `maxRecordSeconds` 秒）。
 - 点发送时把全部待发送照片 → 一次 `POST /c/<token>/upload`（FormData，字段名 `photo`，可多个）。

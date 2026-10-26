@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-camera",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "DSH web plugin: take uncompressed photos and record/upload videos with a LAN phone, review them, then send into the current conversation (manual send, no cloud).",
   "type": "module",
   "exports": {

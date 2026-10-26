@@ -1033,12 +1033,16 @@ test('GET /c/:token：手机页包含视频/录制/原图直传锚点与配置',
     'data-cam-mode-photo',
     'data-cam-mode-video',
     'data-cam-record-time',
+    'data-cam-record-hint',
+    '原始画质',
     'accept="image/*,video/*"',
   ]) {
     assert.ok(html.includes(anchor), `页面缺少视频锚点 ${anchor}`);
   }
   assert.ok(html.includes('"maxVideoBytes":83886080'));
   assert.ok(html.includes('"maxRecordSeconds":60'));
+  assert.ok(html.includes('"recordVideoBitsPerSecond":10000000'));
+  assert.ok(html.includes('height: { ideal: 1080 }'));
   assert.ok(html.includes('convertHeicToJpeg'), 'HEIC 转换函数应存在');
   assert.ok(!html.includes('2400 / maxDim'), '不应再有压缩缩放逻辑');
   assert.ok(html.includes('MediaRecorder'), '全屏相机应支持录像');
