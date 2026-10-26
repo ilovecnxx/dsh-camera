@@ -25,7 +25,10 @@
      → 手工构造 `{id: crypto.randomUUID(), role:'user', content:[{type:'image',attachment:ref}], source:{kind:'user'}}`
      → 深冻结后 `agent.followup(message)`。
 2. **图片限制（默认）**：单图 ≤ 20 MiB、≤ 64e6 像素、边长 ≤ 8192；支持 PNG/JPEG/WebP/GIF。
-   手机端会先 canvas 压缩（长边 ≤ 2400、JPEG 0.85）再上传。
+   **手机端不压缩、不缩放**，原图字节直接上传；唯一例外是 HEIC/HEIF：DSH 不支持，
+   浏览器先解码成全分辨率 JPEG（quality 0.98）再上传。超过 20 MiB 的原图在手机端直接提示。
+   **视频**：DSH 只能把图片送进模型视觉输入，视频走「文件附件」通道（`FileAttachmentRef`，
+   原样保存、不转码）；模型收到文件名/大小/可读取保存路径，不能直接观看视频。
 3. **客户端插件与 Host 的 RPC**：Host 在半边 `ctx.webServer.register({kind:'prefix', path:'/dsh-camera', handler})`
    挂一个 JSON RPC 通道；用 `ctx.connection.requestRejection(req)` 做浏览器鉴权（返回 401/403 即拒绝）。
    Client 端用 `ctx.connection.rpc.call('/dsh-camera', '<endpoint>', payload)` 调用。
@@ -92,7 +95,10 @@ export const DEFAULTS = {
   bindHost: '0.0.0.0',
   lanIpOverride: '',
   tokenTtlMs: 2 * 60 * 60 * 1000,   // 链接有效期 2h
-  maxUploadBytes: 24 * 1024 * 1024, // 单次请求总字节上限
+  maxUploadBytes: 96 * 1024 * 1024, // 单次请求总字节上限（照片+视频）
+  maxImageBytes: 20 * 1024 * 1024,  // 单图上限（不压缩，仅校验；DSH 硬限制）
+  maxVideoBytes: 80 * 1024 * 1024,  // 单个视频上限（原样保存）
+  maxRecordSeconds: 60,     // 页面内录像最长秒数（HTTPS 全屏相机）
   maxFilesPerUpload: 6,
   uploadsPerHour: 120,      // 每 token 每小时上传次数上限
   https: false,             // 可选 HTTPS 监听（getUserMedia 全屏相机需要 secure context）
@@ -153,6 +159,9 @@ export async function readMultipart(req, { maxBytes = 24*1024*1024, maxFiles = 6
 //     header（decodeURIComponent 后）或缺省 'photo.jpg'
 // 超限抛错：err.code='too-large'（在读取过程中即中断并 drain/destroy），非法请求 err.code='bad-request'
 export function sniffImageType(buf) → 'image/jpeg'|'image/png'|'image/webp'|'image/gif'|null
+export function sniffVideoType(buf) → 'video/mp4'|'video/quicktime'|'video/webm'|'video/x-m4v'|'video/3gpp'|null
+export function sniffMedia(buf) → { kind: 'image'|'video', mediaType } | null
+// 按魔数识别 MP4/MOV/M4V（ISO BMFF ftyp）、WebM/Matroska（EBML）；不信任 Content-Type。
 ```
 安全：不信任 filename 路径；不落盘；字段名/文件名仅做展示用清洗（去控制字符、截断 80）。
 
@@ -164,9 +173,15 @@ export function createInjector({ ctx, config, log }) → {
   async validateSession(sessionId) → { ok: true, sessionId, title?: string }
                                   | { ok: false, code: 'session/not-found'|'internal', message }
   // 把一批已通过 sniff/大小检查的图片注入对话；一次上传 = 一条 user 消息（多图一条）
-  async deliver({ sessionId, files }) // files:[{data:Buffer, mediaType, filename}]
+  async deliver({ sessionId, files }) // files:[{kind:'image'|'video', data:Buffer, mediaType, filename}]
     → { ok: true, requestId, count }
     | { ok: false, code, message }    // code 透传 RemoteError.code，details.reason 合并进 message
+```
+- 图片：content 用 `{type:'image', mediaType, data:base64, name}`。
+- 视频：`ctx.fileUploads.uploadStream({sessionId, data, name, signal})` → `receiptId`，
+  content 用 `{type:'file', receiptId}`（Host 的 prompt admission 会 resolve 成 durable
+  `FileAttachmentRef`）；没有 `fileUploads` 时兜底 `ctx.attachments.saveFileStream()` + 手工消息。
+- 图片+视频可在同一条消息里按选择顺序混排。
 }
 ```
 
@@ -199,7 +214,7 @@ HTTP 路由（全部 `Cache-Control: no-store`、`X-Content-Type-Options: nosnif
 | GET | `/` | 302 → `/c/invalid`（无 token；页面显示友好提示） |
 | GET | `/c/:token` | token 有效 → 200 HTML（`page.js`）；无效/过期 → 410 HTML 提示页（中文/英文） |
 | GET | `/c/:token/info` | JSON `{ok:true, value:{title, expiresAt, uploads, serverTime, version, lang}}`；无效 → 404 `{ok:false,error:{code:'invalid-token'}}` |
-| POST | `/c/:token/upload` | 读 multipart → 校验图片(sniff/大小/数量) → injector.deliver → JSON `{ok:true, value:{count, expiresAt, uploads}}`；失败 → 4xx/5xx JSON `{ok:false,error:{code,message}}`（code: invalid-token / too-large / bad-request / no-image / rate-limited / inject-failed:<code>） |
+| POST | `/c/:token/upload` | 读 multipart → `sniffMedia` 分诊（图片/视频）+ 按 kind 校验大小/数量 → injector.deliver → JSON `{ok:true, value:{count, expiresAt, uploads}}`；失败 → 4xx/5xx JSON `{ok:false,error:{code,message}}`（code: invalid-token / too-large / image-too-large / video-too-large / bad-request / no-image / rate-limited / inject-failed:<code>） |
 | GET | `/setup` | 证书安装引导页（HTTPS 全屏相机首次配置；手机打开） |
 | GET | `/ca.mobileconfig` | iOS 配置描述文件（内嵌本地 CA，安装后信任） |
 | GET | `/ca.crt` | CA 证书 PEM（Android/其他系统安装） |
@@ -230,8 +245,11 @@ export function renderCameraPage({
   （`data-cam-send`，无待发送时禁用，文案带数量）与「清空」（`data-cam-clear`）。
   用户可连续「拍照」多次、跨多次选择累积待发送照片（上限 `maxFiles`，默认 6），
   确认后点发送一次性上传为一条 user 消息。
-- 压缩：canvas 长边 ≤ 2400、JPEG 质量 0.85；若原图 < 1.5 MiB 且长边 ≤ 2400 则原样上传；
-  解码失败（如 HEIC）给出友好提示（英文提示 + 中文提示）。
+- **不压缩**：图片原样上传；仅 HEIC/HEIF 由浏览器解码后转全分辨率 JPEG（0.98）；
+  超过 `maxImageBytes` 或解码失败给出中英文提示。视频原样保存，不转码。
+- 视频入口：`data-cam-video-btn`（HTTP 模式调系统相机录像/`<input capture>`）；
+  相册输入接受 `image/*,video/*`；HTTPS 全屏相机内可切「录像」模式
+  （`data-cam-mode-video`、MediaRecorder、`data-cam-record-time`，默认最长 `maxRecordSeconds` 秒）。
 - 点发送时把全部待发送照片 → 一次 `POST /c/<token>/upload`（FormData，字段名 `photo`，可多个）。
 - 成功：绿色「已发送到对话」+ 累计计数；失败：红色错误文案 + 重试按钮；token 过期（410）→ 明确提示「请在电脑上重新打开拍照面板」。
 - 可访问性：`lang` 属性、按钮 aria-label、`prefers-color-scheme` 深色适配、`env(safe-area-inset-*)`。
@@ -289,11 +307,12 @@ export function renderCameraPage({
 
 ### 3.10 依赖注入（Host index.js 的 inject 列表）
 
-`inject = ['webServer', 'connection', 'sessionController', 'attachments']`。
+`inject = ['webServer', 'connection', 'sessionController', 'attachments', 'fileUploads']`。
 - `webServer`：挂 `/dsh-camera` 前缀 RPC 路由；
 - `connection`：`requestRejection(req)` 浏览器鉴权；
 - `sessionController`：`prompt()` 注入 + `inspect()` 校验目标会话；
-- `attachments`：读取部署图片限制（`imageLimits`，inject.js 内仍 try/catch 兜底）。
+- `attachments`：读取部署图片限制（`imageLimits`，inject.js 内仍 try/catch 兜底）、视频兜底 `saveFileStream`；
+- `fileUploads`：视频以 staged receipt 形式进入 prompt（`uploadStream` → `{type:'file', receiptId}`）。
 
 四个服务缺失（非 web 组合）→ 插件保持未加载即可。
 `ctx.effect()` 管理 LAN server 与 RPC 路由的卸载；`server.stop()` 必须在插件卸载时 await/触发。

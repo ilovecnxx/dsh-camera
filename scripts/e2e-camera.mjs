@@ -145,7 +145,7 @@ function inspectPersistedSession(home, sessionId, runStartMs) {
     }
   };
   walk(home, 0);
-  const result = { files: [], imageBlocks: 0, userImageMessages: 0, sessionIdMatched: false };
+  const result = { files: [], imageBlocks: 0, fileBlocks: 0, userImageMessages: 0, sessionIdMatched: false };
   for (const file of files) {
     if (!file.includes(sessionId)) continue;
     const text = readSessionLogText(file);
@@ -164,6 +164,7 @@ function inspectPersistedSession(home, sessionId, runStartMs) {
       const images = json.match(/"type":"image"/g);
       if (!images) continue;
       result.imageBlocks += images.length;
+      result.fileBlocks += (json.match(/"type":"file"/g) || []).length;
       if (value?.type === 'user/message') result.userImageMessages += 1;
     }
   }
@@ -293,6 +294,29 @@ async function run() {
       await delay(300);
       await target.click('[data-cam-shutter]');
       await waitFor(target, `Number(document.body.getAttribute('data-cam-pending') || 0) >= 2`, 'second capture pending', 10000);
+
+      // 同一页面内切到录像模式，录 1.2s 后停止 → 视频进入待发送（不自动上传）。
+      await target.click('[data-cam-mode-video]');
+      await waitFor(target, `(() => { const m = document.querySelector('[data-cam-mode-video]'); return m && m.getAttribute('aria-pressed') === 'true'; })()`, 'video mode', 10000);
+      await waitFor(target, `(() => { const v = document.querySelector('[data-cam-video]'); return !!v && v.readyState >= 2 && v.videoWidth > 0; })()`, 'video-mode stream', 15000);
+      await delay(400);
+      await target.click('[data-cam-shutter]');
+      await waitFor(target, `(() => { const t = document.querySelector('[data-cam-record-time]'); return !!t && !t.hidden; })()`, 'recording timer visible', 10000);
+      await delay(1300);
+      await target.click('[data-cam-shutter]');
+      await waitFor(target, `Number(document.body.getAttribute('data-cam-pending') || 0) >= 3`, 'recorded video pending', 15000);
+      const videoInfo = await target.evaluate(`(() => {
+        const figs = [...document.querySelectorAll('[data-cam-preview]')];
+        const last = figs[figs.length - 1];
+        return {
+          pending: Number(document.body.getAttribute('data-cam-pending') || 0),
+          kind: last ? last.getAttribute('data-kind') : null,
+          name: last ? last.getAttribute('data-name') : null,
+          shots: (document.querySelector('[data-cam-camera-count]') || {}).textContent || '',
+        };
+      })()`);
+      if (videoInfo.kind !== 'video') throw new E2EError('fullscreen-camera-burst', `录制结果不是视频：${JSON.stringify(videoInfo)}`);
+      await shot(target, '05b-phone-recorded-video.png');
       const during = await target.evaluate(`(() => ({
         pending: Number(document.body.getAttribute('data-cam-pending') || 0),
         shots: (document.querySelector('[data-cam-camera-count]') || {}).textContent || '',
@@ -303,26 +327,30 @@ async function run() {
       await target.click('[data-cam-camera-close]');
       await waitFor(target, `(() => { const c = document.querySelector('[data-cam-camera]'); return !!c && c.hidden; })()`, 'camera overlay hidden', 10000);
       const after = await target.evaluate(`(() => ({ pending: Number(document.body.getAttribute('data-cam-pending') || 0), status: document.body.getAttribute('data-cam-status') }))()`);
-      if (during.pending < 2) throw new E2EError('fullscreen-camera-burst', `连拍未进入待发送：${JSON.stringify(during)}`);
+      if (during.pending < 3) throw new E2EError('fullscreen-camera-burst', `连拍/录像未全部进入待发送：${JSON.stringify(during)}`);
       if (during.uploadRequests > 0) throw new E2EError('fullscreen-camera-burst', `连拍时不应自动上传：${JSON.stringify(during)}`);
-      summary.camera = { before, during, after, stream: true };
-      return { pending: during.pending, shots: during.shots, before, after };
+      summary.camera = { before, during, after, stream: true, video: videoInfo };
+      return { pending: during.pending, shots: during.shots, video: videoInfo, before, after };
     });
 
     await step(summary, 'manual-send-and-verify', async () => {
       const target = [...browser.pages].find((page) => page !== gui);
       if (!target) throw new Error('phone page not found');
       await target.click('[data-cam-send]');
-      await waitFor(target, `(() => { const c = document.querySelector('[data-cam-count]'); const p = Number(document.body.getAttribute('data-cam-pending') || 0); return c && Number(c.getAttribute('data-cam-count') || c.textContent || 0) >= 2 && p === 0; })()`, 'sent', 60000);
+      await waitFor(target, `(() => { const c = document.querySelector('[data-cam-count]'); const p = Number(document.body.getAttribute('data-cam-pending') || 0); return c && Number(c.getAttribute('data-cam-count') || c.textContent || 0) >= 3 && p === 0; })()`, 'sent', 60000);
       await shot(target, '06-phone-sent.png');
       const phoneState = await target.evaluate(`(() => ({
         count: Number(document.querySelector('[data-cam-count]')?.getAttribute('data-cam-count') || 0),
         pending: Number(document.body.getAttribute('data-cam-pending') || 0),
       }))()`);
-      if (phoneState.count < 2) throw new E2EError('manual-send-and-verify', `手机页计数 < 2：${JSON.stringify(phoneState)}`);
+      if (phoneState.count < 3) throw new E2EError('manual-send-and-verify', `手机页计数 < 3：${JSON.stringify(phoneState)}`);
 
       await browser.send('Target.activateTarget', { targetId: gui.targetId });
       await waitFor(gui, `(() => { const r = document.querySelector('[data-conversation-content]'); if (!r) return false; return r.querySelectorAll('img').length >= 2; })()`, 'gui images', 30000);
+      await waitFor(gui, `(() => {
+        const r = document.querySelector('[data-conversation-content]');
+        const text = r.innerText || ''; return text.includes('.mp4') || text.includes('.webm') || text.includes('.mov');
+      })()`, 'gui recorded video card', 30000);
       await shot(gui, '07-gui-conversation.png');
       await delay(500);
       const persisted = inspectPersistedSession(HOME, sessionId, runStartMs);
@@ -330,7 +358,17 @@ async function run() {
       if (!persisted.sessionIdMatched || persisted.imageBlocks < 2) {
         throw new E2EError('manual-send-and-verify', `会话日志未找到图片附件：${JSON.stringify(persisted)}`);
       }
-      return { phoneState, persisted: { imageBlocks: persisted.imageBlocks, userImageMessages: persisted.userImageMessages } };
+      if (persisted.fileBlocks < 1) {
+        throw new E2EError('manual-send-and-verify', `会话日志未找到视频文件附件：${JSON.stringify(persisted)}`);
+      }
+      return {
+        phoneState,
+        persisted: {
+          imageBlocks: persisted.imageBlocks,
+          fileBlocks: persisted.fileBlocks,
+          userImageMessages: persisted.userImageMessages,
+        },
+      };
     });
 
     summary.ok = true;

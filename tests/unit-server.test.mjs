@@ -244,7 +244,7 @@ test('页面 JS：覆盖 DESIGN 上传错误码的中英文映射', async (t) =>
     '模型不支持看图',
     '上传太频繁',
     '图片太大',
-    '没有识别到可上传的图片',
+    '没有识别到可发送的照片或视频',
     '发送超时',
     '这个对话已不存在',
     '无法读取这张图片',
@@ -258,7 +258,7 @@ test('页面 JS：覆盖 DESIGN 上传错误码的中英文映射', async (t) =>
     'cannot see images',
     'Too many uploads',
     'too large',
-    'No supported image',
+    'No supported photo or video',
     'timed out',
     'no longer exists',
     "Couldn't read this photo",
@@ -515,7 +515,7 @@ test('POST upload：单图超过 20 MiB → 413 too-large', async (t) => {
   const res = await postUpload(h.uploadUrl, 'image/png', huge);
   assert.equal(res.status, 413);
   const json = await res.json();
-  assert.equal(json.error.code, 'too-large');
+  assert.equal(json.error.code, 'image-too-large');
   assert.equal(h.calls.length, 0);
 });
 
@@ -955,4 +955,91 @@ test('HTTPS：未开启时 /ca.* 404，且 info.httpsEnabled=false', async (t) =
   const html = await (await fetch(`${h.base}/c/${h.token}`)).text();
   assert.ok(html.includes('"secure":false'));
   assert.ok(html.includes('"httpsUrl":null'));
+});
+
+// --------------------------------------------------------------------- 视频 / 原图
+
+const MP4 = Buffer.concat([
+  Buffer.from([0x00, 0x00, 0x00, 0x18]),
+  Buffer.from('ftypisom', 'latin1'),
+  Buffer.from([0x00, 0x00, 0x02, 0x00]),
+  Buffer.from('isomiso2avc1mp41', 'latin1'),
+  Buffer.alloc(64, 7),
+]);
+const WEBM = Buffer.concat([
+  Buffer.from([0x1a, 0x45, 0xdf, 0xa3]),
+  Buffer.alloc(64, 3),
+]);
+
+test('POST upload：MP4 / WebM 视频 → injector 收到 kind=video 且原样字节', async (t) => {
+  const h = await startHarness(t, { maxUploadBytes: 1024 * 1024 });
+  for (const [name, bytes, mediaType] of [
+    ['clip.mp4', MP4, 'video/mp4'],
+    ['clip.webm', WEBM, 'video/webm'],
+  ]) {
+    const { contentType, body } = multipartBody(
+      [{ name: 'photo', filename: name, contentType: 'video/mp4', data: bytes }],
+      boundaryFor(name),
+    );
+    const res = await fetch(h.uploadUrl, { method: 'POST', headers: { 'content-type': contentType }, body });
+    assert.equal(res.status, 200, `${name} 应上传成功`);
+    const json = await res.json();
+    assert.equal(json.ok, true);
+    const call = h.calls.at(-1);
+    assert.equal(call.files.length, 1);
+    assert.equal(call.files[0].kind, 'video');
+    assert.equal(call.files[0].mediaType, mediaType);
+    assert.deepEqual(call.files[0].data, bytes, '视频必须原样上传，不转码');
+  }
+});
+
+test('POST upload：图片+视频混合 → 一次 deliver，保持输入顺序与 kind', async (t) => {
+  const h = await startHarness(t, { maxUploadBytes: 1024 * 1024 });
+  const { contentType, body } = multipartBody(
+    [
+      { name: 'photo', filename: 'a.png', contentType: 'image/png', data: PNG },
+      { name: 'photo', filename: 'b.mp4', contentType: 'video/mp4', data: MP4 },
+    ],
+    boundaryFor('mixed'),
+  );
+  const res = await fetch(h.uploadUrl, { method: 'POST', headers: { 'content-type': contentType }, body });
+  assert.equal(res.status, 200);
+  const call = h.calls[0];
+  assert.deepEqual(call.files.map((file) => file.kind), ['image', 'video']);
+  assert.deepEqual(call.files.map((file) => file.filename), ['a.png', 'b.mp4']);
+});
+
+test('POST upload：视频超过 maxVideoBytes → 413 video-too-large', async (t) => {
+  const h = await startHarness(t, { maxUploadBytes: 1024 * 1024, config: { maxVideoBytes: 128 } });
+  const big = Buffer.concat([MP4, Buffer.alloc(256, 1)]);
+  const { contentType, body } = multipartBody(
+    [{ name: 'photo', filename: 'big.mp4', contentType: 'video/mp4', data: big }],
+    boundaryFor('bigvideo'),
+  );
+  const res = await fetch(h.uploadUrl, { method: 'POST', headers: { 'content-type': contentType }, body });
+  assert.equal(res.status, 413);
+  const json = await res.json();
+  assert.equal(json.error.code, 'video-too-large');
+  assert.equal(h.calls.length, 0);
+});
+
+test('GET /c/:token：手机页包含视频/录制/原图直传锚点与配置', async (t) => {
+  const h = await startHarness(t);
+  const res = await fetch(`${h.base}/c/${h.token}`, { headers: { 'accept-language': 'zh-CN' } });
+  const html = await res.text();
+  for (const anchor of [
+    'data-cam-video-btn',
+    'data-cam-input-video',
+    'data-cam-mode-photo',
+    'data-cam-mode-video',
+    'data-cam-record-time',
+    'accept="image/*,video/*"',
+  ]) {
+    assert.ok(html.includes(anchor), `页面缺少视频锚点 ${anchor}`);
+  }
+  assert.ok(html.includes('"maxVideoBytes":83886080'));
+  assert.ok(html.includes('"maxRecordSeconds":60'));
+  assert.ok(html.includes('convertHeicToJpeg'), 'HEIC 转换函数应存在');
+  assert.ok(!html.includes('2400 / maxDim'), '不应再有压缩缩放逻辑');
+  assert.ok(html.includes('MediaRecorder'), '全屏相机应支持录像');
 });

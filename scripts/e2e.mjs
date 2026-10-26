@@ -150,6 +150,26 @@ async function clearBlockingModal(page) {
   return clicked;
 }
 
+/**
+ * 写一个最小 MP4 测试文件（ftyp 容器头 + 填充字节）。只用于验证上传链路：
+ * 服务端按文件头归类为视频并原样保存，不做解码/转码。
+ * @param {string} dir - target directory.
+ * @returns {string} absolute file path.
+ */
+function writeTestVideo(dir) {
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, 'cam-test-video.mp4');
+  const mp4 = Buffer.concat([
+    Buffer.from([0x00, 0x00, 0x00, 0x18]),
+    Buffer.from('ftypisom', 'latin1'),
+    Buffer.from([0x00, 0x00, 0x02, 0x00]),
+    Buffer.from('isomiso2avc1mp41', 'latin1'),
+    Buffer.alloc(2048, 9),
+  ]);
+  fs.writeFileSync(file, mp4);
+  return file;
+}
+
 /** 等待 expression 返回 truthy 的 JSON 值。 */
 async function waitForValue(page, expression, { timeoutMs = 20_000, intervalMs = 150, label = expression } = {}) {
   return page.waitFor(expression, { timeoutMs, intervalMs, label });
@@ -311,7 +331,14 @@ function inspectPersistedSession(home, sessionId, runStartMs) {
     }
   };
   walk(home, 0);
-  const result = { files: [], imageBlocks: 0, userImageMessages: 0, sessionIdMatched: false, sample: null };
+  const result = {
+    files: [],
+    imageBlocks: 0,
+    fileBlocks: 0,
+    userImageMessages: 0,
+    sessionIdMatched: false,
+    sample: null,
+  };
   for (const { file } of files) {
     if (!file.includes(sessionId)) continue;
     const text = readSessionLogText(file);
@@ -330,6 +357,7 @@ function inspectPersistedSession(home, sessionId, runStartMs) {
       const imageMatches = json.match(/"type":"image"/g);
       if (!imageMatches) continue;
       result.imageBlocks += imageMatches.length;
+      result.fileBlocks += (json.match(/"type":"file"/g) || []).length;
       if (value?.type === 'user/message' || json.includes('"role":"user"')) result.userImageMessages += 1;
       result.sample ||= json.slice(0, 600);
     }
@@ -560,7 +588,14 @@ export async function runE2E({ log: logger = log, imageCount = 2 } = {}) {
 
     await step('upload-test-photos', async () => {
       const images = writeTestImages(IMAGE_DIR, { count: imageCount });
-      logger(`[e2e]   test images: ${images.map((file) => `${path.basename(file)}(${fs.statSync(file).size}B)`).join(', ')}`);
+      const video = writeTestVideo(IMAGE_DIR);
+      const videoCount = 1;
+      const totalCount = imageCount + videoCount;
+      logger(
+        `[e2e]   test media: ${[...images, video]
+          .map((file) => `${path.basename(file)}(${fs.statSync(file).size}B)`)
+          .join(', ')}`,
+      );
 
       // 先确认是「手动发送」模式：初始发送按钮禁用、待发送 0、没有任何上传请求。
       const baseline = await state.phone.evaluate(`(() => {
@@ -573,7 +608,7 @@ export async function runE2E({ log: logger = log, imageCount = 2 } = {}) {
       })()`);
       if (baseline.sendDisabled !== true) throw new Error(`初始发送按钮应禁用（定位：page.js 手动发送模式）：${JSON.stringify(baseline)}`);
 
-      await state.phone.setFileInputFiles('[data-cam-input-gallery]', images);
+      await state.phone.setFileInputFiles('[data-cam-input-gallery]', [...images, video]);
 
       // 选完照片后只做压缩预览，不应自动上传。
       await waitForValue(
@@ -581,9 +616,9 @@ export async function runE2E({ log: logger = log, imageCount = 2 } = {}) {
         `(() => {
           const send = document.querySelector('[data-cam-send]');
           const pending = Number(document.body.getAttribute('data-cam-pending') || 0);
-          return !!send && !send.disabled && pending >= ${imageCount} ? pending : null;
+          return !!send && !send.disabled && pending >= ${totalCount} ? pending : null;
         })()`,
-        { timeoutMs: 60_000, label: `send button ready (pending >= ${imageCount})` },
+        { timeoutMs: 60_000, label: `send button ready (pending >= ${totalCount})` },
       );
       const readyState = await state.phone.evaluate(`(() => {
         const send = document.querySelector('[data-cam-send]');
@@ -604,7 +639,7 @@ export async function runE2E({ log: logger = log, imageCount = 2 } = {}) {
       if (uploadRequestsBeforeSend > 0) {
         throw new Error(`选择照片后不应自动上传（应等用户点发送）：已看到 ${uploadRequestsBeforeSend} 个 upload 请求`);
       }
-      if (!/发送 2 张|Send 2 photos/.test(readyState.sendLabel)) {
+      if (!new RegExp(`发送 ${totalCount} 项|Send ${totalCount} items`).test(readyState.sendLabel)) {
         throw new Error(`发送按钮文案应显示待发送数量：${JSON.stringify(readyState)}`);
       }
 
@@ -645,7 +680,7 @@ export async function runE2E({ log: logger = log, imageCount = 2 } = {}) {
           writeJson(path.join(OUT_DIR, 'failure-upload-net.json'), uploadEvidence);
           throw new Error(`手机页上传失败（定位：page.js fetch / server upload / injector.deliver）：${JSON.stringify(uploadEvidence).slice(0, 1800)}`);
         }
-        if (last.count >= imageCount && last.pending === 0) {
+        if (last.count >= totalCount && last.pending === 0) {
           sentSnapshot = last;
           break;
         }
@@ -655,12 +690,13 @@ export async function runE2E({ log: logger = log, imageCount = 2 } = {}) {
       if (!sentSnapshot) {
         throw new Error(`点发送后等待上传完成超时（${PHONE_DONE_TIMEOUT}ms）：${JSON.stringify(last)}`);
       }
-      if (!last || last.count < imageCount) {
-        throw new Error(`手机页 data-cam-count=${last?.count} 小于上传张数 ${imageCount}`);
+      if (!last || last.count < totalCount) {
+        throw new Error(`手机页 data-cam-count=${last?.count} 小于上传内容数 ${totalCount}`);
       }
       summary.phone.upload = {
         ...last,
         images,
+        video,
         timeout: false,
         manual: true,
         pendingBeforeSend: readyState.pending,
@@ -691,6 +727,8 @@ export async function runE2E({ log: logger = log, imageCount = 2 } = {}) {
         sendLabel: readyState.sendLabel,
         uploadRequestsBeforeSend,
         images: images.map((file) => path.basename(file)),
+        video: path.basename(video),
+        totalCount,
       };
     });
 
@@ -712,7 +750,7 @@ export async function runE2E({ log: logger = log, imageCount = 2 } = {}) {
     await step('gui-image-message', async () => {
       let snapshot;
       try {
-        snapshot = await waitForConversationImage(state.gui, { timeoutMs: GUI_IMAGE_TIMEOUT, minCount: 1 });
+        snapshot = await waitForConversationImage(state.gui, { timeoutMs: GUI_IMAGE_TIMEOUT, minCount: imageCount });
       } catch (error) {
         const diag = await dumpPageDiagnostics(state.gui);
         writeJson(path.join(OUT_DIR, 'failure-conversation-dom.json'), {
@@ -723,6 +761,15 @@ export async function runE2E({ log: logger = log, imageCount = 2 } = {}) {
         });
         throw error;
       }
+      // 视频以文件卡片进入对话：等文件名出现在会话区域。
+      await waitForValue(
+        state.gui,
+        `(() => {
+          const region = document.querySelector('[data-conversation-content]');
+          return !!region && (region.innerText || '').includes('cam-test-video.mp4');
+        })()`,
+        { timeoutMs: 30_000, label: 'video file card in conversation' },
+      );
       await screenshot(state.gui, '06-gui-conversation.png');
       summary.gui.conversationImages = { count: snapshot.count, srcs: snapshot.srcs, blobUrls: snapshot.blobUrls, canvasCount: snapshot.canvasCount };
       return { count: snapshot.count, blobUrls: snapshot.blobUrls, srcs: snapshot.srcs.slice(0, 4) };
@@ -762,6 +809,11 @@ export async function runE2E({ log: logger = log, imageCount = 2 } = {}) {
       if (persisted.imageBlocks < imageCount) {
         throw new Error(
           `会话日志里 image 块数量 ${persisted.imageBlocks} < 上传张数 ${imageCount}（定位：inject.js / session 持久化）：${JSON.stringify(persisted)}`,
+        );
+      }
+      if (persisted.fileBlocks < 1) {
+        throw new Error(
+          `会话日志里 file 块数量 ${persisted.fileBlocks} < 1（视频未作为文件附件落库，定位：inject.js fileUploads）：${JSON.stringify(persisted)}`,
         );
       }
       return persisted;

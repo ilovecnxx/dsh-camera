@@ -398,13 +398,22 @@ test('limits: 从 ctx.attachments.imageLimits 读取，缺省 20 张 / 20 MiB', 
   assert.deepEqual(makeInjector().injector.limits(), {
     maxImagesPerMessage: 20,
     maxImageBytes: 20 * 1024 * 1024,
+    maxVideoBytes: 80 * 1024 * 1024,
+    maxFilesPerUpload: 6,
   });
   const custom = makeInjector({ imageLimits: { maxImagesPerMessage: 3, maxImageBytes: 1234 } });
-  assert.deepEqual(custom.injector.limits(), { maxImagesPerMessage: 3, maxImageBytes: 1234 });
+  assert.deepEqual(custom.injector.limits(), {
+    maxImagesPerMessage: 3,
+    maxImageBytes: 1234,
+    maxVideoBytes: 80 * 1024 * 1024,
+    maxFilesPerUpload: 6,
+  });
   const invalid = makeInjector({ imageLimits: { maxImagesPerMessage: 'x', maxImageBytes: null } });
   assert.deepEqual(invalid.injector.limits(), {
     maxImagesPerMessage: 20,
     maxImageBytes: 20 * 1024 * 1024,
+    maxVideoBytes: 80 * 1024 * 1024,
+    maxFilesPerUpload: 6,
   });
 });
 
@@ -419,4 +428,127 @@ test('mapAdmissionError: 独立导出的错误映射保持稳定 code', () => {
     mapAdmissionError(Object.assign(new Error('aborted'), { name: 'AbortError' })).code,
     'inject-timeout',
   );
+});
+
+// ---------------------------------------------------------------------------
+// 视频（文件附件）与图片混合
+// ---------------------------------------------------------------------------
+
+const MP4_BYTES = Buffer.concat([
+  Buffer.from([0x00, 0x00, 0x00, 0x18]),
+  Buffer.from('ftypisom', 'latin1'),
+  Buffer.alloc(64, 9),
+]);
+
+function mediaCtx({ withFileUploads = true, uploadStream, saveFileStream } = {}) {
+  const controller = makeController();
+  const ctx = {
+    sessionController: controller.controller,
+    attachments: {
+      imageLimits: { maxImagesPerMessage: 20, maxImageBytes: 20 * 1024 * 1024 },
+      saveImage: async ({ name }) => ({ attachmentId: `image-${name}`, name, bytes: 1 }),
+    },
+  };
+  if (withFileUploads) {
+    ctx.fileUploads = {
+      uploadStream: uploadStream ?? (async (request) => {
+        const chunks = [];
+        for await (const chunk of request.data) chunks.push(Buffer.from(chunk));
+        return { receiptId: 'receipt-video-1', file: { attachmentId: 'file-1', name: request.name, bytes: chunks.length } };
+      }),
+    };
+  }
+  if (saveFileStream !== undefined) ctx.attachments.saveFileStream = saveFileStream;
+  return { ctx, calls: controller.calls, followups: controller.followups };
+}
+
+const imageFile = (name = 'a.png') => ({ kind: 'image', data: IMAGE_BYTES, mediaType: 'image/png', filename: name });
+const videoFile = (name = 'a.mp4', bytes = MP4_BYTES) => ({
+  kind: 'video',
+  data: bytes,
+  mediaType: 'video/mp4',
+  filename: name,
+});
+
+test('deliver：图片 + 视频 → 一条 prompt，视频以 file receiptId 引用', async () => {
+  const staged = [];
+  const { ctx, calls } = mediaCtx({
+    uploadStream: async (request) => {
+      const chunks = [];
+      for await (const chunk of request.data) chunks.push(Buffer.from(chunk));
+      staged.push({ name: request.name, sessionId: request.sessionId, bytes: Buffer.concat(chunks) });
+      return { receiptId: 'receipt-video-1', file: { attachmentId: 'file-1', name: request.name, bytes: 1 } };
+    },
+  });
+  const log = makeLog();
+  const injector = createInjector({ ctx, config: { maxVideoBytes: 80 * 1024 * 1024, maxFilesPerUpload: 6 }, log });
+  const result = await injector.deliver({
+    sessionId: 'session-media-1',
+    files: [imageFile('a.png'), videoFile('clip.mp4')],
+  });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(result.count, 2);
+  assert.equal(staged.length, 1);
+  assert.equal(staged[0].sessionId, 'session-media-1');
+  assert.deepEqual(staged[0].bytes, MP4_BYTES, '视频必须原样流式暂存，不转码');
+  assert.equal(calls.prompt.length, 1);
+  const { request } = calls.prompt[0];
+  assert.equal(request.mode, 'queue');
+  assert.equal(request.content.length, 2);
+  assert.equal(request.content[0].type, 'image');
+  assert.equal(request.content[0].data, IMAGE_BYTES.toString('base64'));
+  assert.deepEqual(request.content[1], { type: 'file', receiptId: 'receipt-video-1' });
+});
+
+test('deliver：视频在前、图片在后 → content 顺序与选择顺序一致', async () => {
+  const { ctx, calls } = mediaCtx();
+  const injector = createInjector({ ctx, config: {}, log: makeLog() });
+  const result = await injector.deliver({
+    sessionId: 'session-media-2',
+    files: [videoFile('first.mp4'), imageFile('second.jpg')],
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(calls.prompt[0].request.content.map((part) => part.type), ['file', 'image']);
+});
+
+test('deliver：视频超过 maxVideoBytes → video-too-large，且不调用 prompt/uploadStream', async () => {
+  let staged = 0;
+  const { ctx, calls } = mediaCtx({ uploadStream: async () => { staged += 1; return { receiptId: 'x' }; } });
+  const injector = createInjector({ ctx, config: { maxVideoBytes: 32 }, log: makeLog() });
+  const result = await injector.deliver({ sessionId: 'session-media-3', files: [videoFile('big.mp4')] });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'video-too-large');
+  assert.equal(staged, 0);
+  assert.equal(calls.prompt.length, 0);
+});
+
+test('deliver：不支持的视频 mediaType → video-invalid', async () => {
+  const { ctx } = mediaCtx();
+  const injector = createInjector({ ctx, config: {}, log: makeLog() });
+  const bad = { ...videoFile('x.avi'), mediaType: 'video/x-msvideo' };
+  const result = await injector.deliver({ sessionId: 'session-media-4', files: [bad] });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'video-invalid');
+});
+
+test('deliver：无 fileUploads 但有 attachments.saveFileStream → 兜底消息含 file block', async () => {
+  const savedFileChunks = [];
+  const { ctx, followups } = mediaCtx({
+    withFileUploads: false,
+    saveFileStream: async ({ data, name }) => {
+      for await (const chunk of data) savedFileChunks.push(Buffer.from(chunk));
+      return { attachmentId: 'file-fallback', name, bytes: MP4_BYTES.length };
+    },
+  });
+  const injector = createInjector({ ctx, config: {}, log: makeLog() });
+  const result = await injector.deliver({
+    sessionId: 'session-media-5',
+    files: [imageFile('a.png'), videoFile('clip.mp4')],
+  });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.equal(followups.length, 1);
+  const message = followups[0];
+  assert.deepEqual(message.content.map((block) => block.type), ['image', 'file']);
+  assert.equal(message.content[1].attachment.name, 'clip.mp4');
+  assert.deepEqual(Buffer.concat(savedFileChunks), MP4_BYTES);
 });

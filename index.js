@@ -30,7 +30,7 @@ export const name = 'dsh-camera';
  * `connection` owns browser authentication, and `sessionController` owns prompt
  * admission for the target Session.
  */
-export const inject = ['webServer', 'connection', 'sessionController', 'attachments'];
+export const inject = ['webServer', 'connection', 'sessionController', 'attachments', 'fileUploads'];
 
 /** Interval for pruning expired tokens from the persisted store. */
 const PRUNE_INTERVAL_MS = 10 * 60 * 1000;
